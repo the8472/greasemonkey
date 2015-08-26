@@ -16,7 +16,6 @@ Cu.import("chrome://greasemonkey-modules/content/sync.js");
 Cu.import("chrome://greasemonkey-modules/content/util.js");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
-Cu.import("chrome://greasemonkey-modules/content/refererSetter.js", {});
 
 
 var gStartupHasRun = false;
@@ -57,8 +56,6 @@ function startup(aService) {
       .getService(Ci.nsIMessageListenerManager);
   globalMessageManager.addMessageListener(
       'greasemonkey:script-install', aService.scriptInstall.bind(aService));
-  globalMessageManager.addMessageListener(
-      'greasemonkey:scripts-for-url', aService.getScriptsForUrl.bind(aService));
 
   var scriptValHandler = aService.handleScriptValMsg.bind(aService);
   globalMessageManager.addMessageListener(
@@ -82,6 +79,19 @@ function startup(aService) {
   // Why?  Who knows!?
   globalMessageManager.loadFrameScript(
       'chrome://greasemonkey/content/framescript.js', true);
+  
+
+  
+  // beam down initial set of scripts
+  aService.broadcastScriptUpdates();
+  // beam down on updates
+  aService.config.addObserver({notifyEvent: function(script, event, data) {
+    if(["modified", "install", "move", "edit-enabled", "uninstall"].some(function(e) {return e == event;})) {
+      aService.broadcastScriptUpdates();
+    }
+  }});
+  
+  Cu.import("chrome://greasemonkey-modules/content/refererSetter.js", {});
 
   Services.obs.addObserver(aService, 'quit-application', false);
 
@@ -132,6 +142,21 @@ service.prototype.__defineGetter__('config', function() {
   return this._config;
 });
 
+service.prototype.broadcastScriptUpdates = function(target) {
+  var ipcScripts = this.config.scripts.map(function(script) {
+    return new IPCScript(script);        
+  });
+  
+  var excludes = this.config._globalExcludes;
+  
+  var data = { scripts: ipcScripts, globalExcludes: excludes}
+  
+  // for new processes
+  Services.ppmm.initialProcessData["greasemonkey:scripts-update"] = data;
+  // for existing ones
+  Services.ppmm.broadcastAsyncMessage("greasemonkey:scripts-update", data);
+}
+
 service.prototype.closeAllScriptValStores = function() {
   for (var scriptId in this.scriptValStores) {
     var scriptValStore = this.scriptValStores[scriptId];
@@ -139,11 +164,7 @@ service.prototype.closeAllScriptValStores = function() {
   }
 };
 
-service.prototype.getScriptsForUrl = function(aMessage) {
-  var url = aMessage.data.url;
-  var when = aMessage.data.when;
-  var windowId = aMessage.data.windowId;
-  var browser = aMessage.target;
+service.prototype.scriptRefresh = function(when, url, windowId, browser) {
 
   if (!GM_util.getEnabled() || !url) return [];
   if (!GM_util.isGreasemonkeyable(url)) return [];
@@ -152,20 +173,6 @@ service.prototype.getScriptsForUrl = function(aMessage) {
     this.config.updateModifiedScripts(when, url, windowId, browser);
   }
 
-  var scripts = this.config.getMatchingScripts(function(script) {
-    try {
-      return GM_util.scriptMatchesUrlAndRuns(script, url, when);
-    } catch (e) {
-      GM_util.logError(e, false, e.fileName, e.lineNumber);
-      // See #1692; Prevent failures like that from being so severe.
-      return false;
-    }
-  }).map(function(script) {
-    // Make the script serializable so it can be sent to the frame script.
-    return new IPCScript(script, gGreasemonkeyVersion);
-  });
-
-  return scripts;
 };
 
 service.prototype.getScriptsForUuid = function(aMessage) {
